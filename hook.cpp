@@ -175,11 +175,9 @@ inline void add_to_mpsc(IO_task* task) {
         IO_task *at, *at_next;
         if (mpsc_head.load() == task) {
             IOURING_SUBMIT
-            mpsc_submit_head = is_submit_complete(task);
-            if (mpsc_submit_head == nullptr) {
-                mpsc_submit_tail = nullptr;  // finish
-                return;
-            }
+            IO_task* cur_head = is_submit_complete(task);
+            if (cur_head == nullptr) return;
+            mpsc_submit_head = cur_head;
         } else {
             mpsc_submit_head = is_submit_complete(task);
         }
