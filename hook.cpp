@@ -67,6 +67,7 @@ inline bool add_to_sq_no_wait(IO_task* task) {
         io_uring_prep_write(sqe, task->fd, task->buf, task->nbytes, fd_offset[task->fd]);
     }
     // printf("add to sq %d\n", task->fd);
+    // printf("release %p\n", task);
     butil::return_object<IO_task>(task);  // delete request object
     return true;
 }
@@ -82,7 +83,6 @@ inline IO_task* is_submit_complete(IO_task* old_head) {
 }
 
 static void* keep_submit(void* arg) {
-    printf("do we really need keep_submit?\n");
     // in bthread, keep submitting requests
     // submit [tail, head)
     while (mpsc_submit_tail != nullptr && mpsc_submit_tail != mpsc_submit_head) {
@@ -99,6 +99,7 @@ static void* keep_submit(void* arg) {
         }
     }
     // submit head
+    // printf("submit head: %p\n", mpsc_submit_head);
     while (1) {
         if (add_to_sq_no_wait(mpsc_submit_head)) {
             break;
@@ -115,18 +116,15 @@ static void* keep_submit(void* arg) {
 
     // check new head
     do {
-        IO_task *at, *at_next;
+        IO_task *cur_head, *at, *at_next;
         if (mpsc_head.load() == mpsc_submit_head) {
             IOURING_SUBMIT
-            mpsc_submit_head = is_submit_complete(mpsc_submit_head);
-            if (mpsc_submit_head == nullptr) {
-                mpsc_submit_tail = nullptr;
-                return nullptr;
-            }
+            cur_head = is_submit_complete(mpsc_submit_head);
+            if (cur_head == nullptr) return nullptr;
         } else {
-            mpsc_submit_head = is_submit_complete(mpsc_submit_head);
+            cur_head = is_submit_complete(mpsc_submit_head);
         }
-        at = mpsc_submit_head;
+        at = cur_head;
         at_next = at->next;
         while (at_next != mpsc_submit_head) {
             IO_task* temp_store = at_next->next;
@@ -134,7 +132,7 @@ static void* keep_submit(void* arg) {
             at = at_next;
             at_next = temp_store;
         }
-        mpsc_submit_head->next = nullptr;
+        cur_head->next = nullptr;
         while (at != nullptr) {
             mpsc_submit_tail = at;
             if (add_to_sq_no_wait(at)) {
@@ -149,6 +147,7 @@ static void* keep_submit(void* arg) {
                 }
             }
         }
+        mpsc_submit_head = cur_head;
     } while (1);
 }
 
@@ -193,8 +192,7 @@ inline void add_to_mpsc(IO_task* task) {
             at = at_next;
             at_next = temp_store;
         }
-        task = mpsc_submit_head;
-        task->next = nullptr;
+        mpsc_submit_head->next = nullptr;
         // list: at -> task
         while (at != nullptr) {  // try to submit all of these requests
             mpsc_submit_tail = at;
@@ -206,6 +204,7 @@ inline void add_to_mpsc(IO_task* task) {
                 return;               // prevent blocking
             }
         }
+        task = mpsc_submit_head;
     } while (1);
 }
 
@@ -263,6 +262,7 @@ __attribute__((constructor)) void library_init() {
         LOG(FATAL) << "Cannot add io_uring epoll instance.";
     }
     if (!dispathcer.Running()) brpc::GetGlobalEventDispatcher(ring.ring_fd).Start(nullptr);
+    LOG(INFO) << "IO_Uring Hook successfully.";
 }
 
 __attribute__((destructor)) void library_cleanup() {
