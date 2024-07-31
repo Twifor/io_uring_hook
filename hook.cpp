@@ -1,37 +1,16 @@
-#include <atomic>
-#include <brpc/event_dispatcher.h>
-#include <bthread/bthread.h>
-#include <bthread/condition_variable.h>
-#include <butil/logging.h>
-#include <butil/object_pool.h>
-#include <butil/scoped_lock.h>
-#include <cstdarg>
-#include <cstdio>
-#include <cstdlib>
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <liburing.h>
-#include <memory>
-#include <sys/stat.h>
+#include "hook.h"
 
 const int QD = 256;
-const int FD_SIZE = 4096;
-const int EPOLL_OUT_FD = FD_SIZE - 1;  // reserved position
+const int FD_SIZE = 8192000;
 
-#define IOURING_SUBMIT                                                    \
-    {                                                                     \
-        int ret = io_uring_submit(&ring);                                 \
-        if (ret < 0) LOG(FATAL) << "io_uring_submit: " << strerror(-ret); \
-        ;                                                                 \
-    }
+static bool is_file_fd[FD_SIZE];     // is a file? (not socket)
+static uint64_t fd_offset[FD_SIZE];  // offset of files
+static struct io_uring ring;
+static butil::atomic<IOTask*> mpsc_head;
+static bthread_t keep_submit_bthread;
+static butil::atomic<int>* epoll_butex;
 
-static bool is_file_fd[FD_SIZE];                     // is a file? (not socket)
-static bthread::ConditionVariable* b_cond[FD_SIZE];  // condition variables
-static bthread::Mutex* b_mutex[FD_SIZE];             // mutex
-static uint64_t fd_offset[FD_SIZE];                  // offset of files
-static ssize_t fd_ret[FD_SIZE];                      // return value
-
-// original functions:
+// original functions
 typedef int (*fn_open_ptr)(const char*, int, ...);
 typedef int (*fn_close_ptr)(int);
 typedef ssize_t (*fn_read_ptr)(int __fd, void* __buf, size_t __nbytes);
@@ -43,167 +22,185 @@ static fn_read_ptr fn_read = nullptr;
 static fn_write_ptr fn_write = nullptr;
 static fn_openat_ptr fn_openat = nullptr;
 
-struct IO_task {
-    int type;  // 0: read, 1: write
+#define ____cacheline_aligned __attribute__((__aligned__(64)))
+
+struct Statistic {
+    uint64_t sum = 0;
+    uint64_t sum2 = 0;
+    uint64_t cnt = 0;
+    inline void add(int x) {
+        sum += x;
+        sum2 += 1LL * x * x;
+        ++cnt;
+    }
+
+    inline double mean() const {
+        return 1.0 * sum / cnt;
+    }
+
+    inline double std() const {
+        return sqrt(1.0 * sum2 / cnt - mean() * mean());
+    }
+};
+static Statistic statistic;
+
+struct ____cacheline_aligned IOTask {
+    IOType type;  // 0: read, 1: write
     int fd;
     void* buf;
     ssize_t nbytes;
-    IO_task* next;
-    IO_task() : next(nullptr) {}
-};
-static struct io_uring ring;
-static butil::atomic<IO_task*> mpsc_head;
-static IO_task *mpsc_submit_tail, *mpsc_submit_head;
-static bthread_t keep_submit_bthread;
+    ssize_t return_value;
+    butil::atomic<int>* butex;
 
-inline bool add_to_sq_no_wait(IO_task* task) {
+    IOTask* next;
+
+    IOTask() {}
+
+    void init() {
+        butex = bthread::butex_create_checked<butil::atomic<int>>();
+        next = nullptr;
+    }
+
+    void process() {
+        const int expected_val = butex->load(butil::memory_order_relaxed);
+        add_to_mpsc(this);
+        int rc = bthread::butex_wait(butex, expected_val, nullptr);
+        const int saved_errno = errno;
+        if (rc < 0) {
+            // printf("retry")
+            if (saved_errno == 11 && butex->load(butil::memory_order_relaxed) != expected_val) return;
+            LOG(FATAL) << "butex error: " << strerror(saved_errno);
+        }
+    }
+
+    void release() {
+        bthread::butex_destroy(butex);
+    }
+};
+
+inline void submit() {
+    int ret = io_uring_submit(&ring);
+    if (ret < 0) LOG(FATAL) << "io_uring_submit: " << strerror(-ret);
+    statistic.add(ret);
+    // printf("submit %d\n", ret);
+}
+
+inline IOTask* is_submit_complete(IOTask* old_head) {
+    IOTask *desired = nullptr, *new_head = old_head;
+    // attempt to do CAS
+    if (mpsc_head.compare_exchange_strong(new_head, desired, butil::memory_order_acquire)) {
+        return nullptr;
+    }
+    IOTask* at = new_head;
+    IOTask* at_next = at->next;
+    while (at_next == nullptr) sched_yield(), at_next = at->next;
+    // reverse the list
+    do {
+        IOTask* temp_store = at_next->next;
+        int hh = 0;
+        while (at_next != old_head && temp_store == nullptr) sched_yield(), temp_store = at_next->next;
+        at_next->next = at;
+        at = at_next;
+        at_next = temp_store;
+    } while (at != old_head);
+    new_head->next = nullptr;
+    return new_head;
+}
+
+inline bool add_to_sq_no_wait(IOTask* task) {
     struct io_uring_sqe* sqe;
     sqe = io_uring_get_sqe(&ring);
-    if (!sqe) return false;     // there is no empty sqe
-    sqe->user_data = task->fd;  // record fd
-    if (task->type == 0) {      // read
+    if (!sqe) return false;                              // there is no empty sqe
+    sqe->user_data = reinterpret_cast<long long>(task);  // record task
+    if (task->type == IOType::READ) {                    // read
         io_uring_prep_read(sqe, task->fd, task->buf, task->nbytes, fd_offset[task->fd]);
-    } else if (task->type == 1) {  // write
+    } else if (task->type == IOType::WRITE) {  // write
         io_uring_prep_write(sqe, task->fd, task->buf, task->nbytes, fd_offset[task->fd]);
     }
-    // printf("add to sq %d\n", task->fd);
-    // printf("release %p\n", task);
-    butil::return_object<IO_task>(task);  // delete request object
     return true;
 }
 
-// return new head
-inline IO_task* is_submit_complete(IO_task* old_head) {
-    IO_task* desired = nullptr;
-    // attempt to do CAS
-    if (mpsc_head.compare_exchange_strong(old_head, desired, butil::memory_order_acquire)) {
-        return nullptr;
+inline IOTask* waitfor_epoll(IOTask* task) {
+    const int expected_val = epoll_butex->load();
+    if (add_to_sq_no_wait(task)) return task->next;
+    submit();
+    int rc = bthread::butex_wait(epoll_butex, expected_val, nullptr);
+    const int saved_errno = errno;
+    if (rc < 0) {
+        if (rc == 11 && epoll_butex->load(butil::memory_order_release) != expected_val) return task;
+        LOG(FATAL) << "butex error: " << strerror(errno);
     }
-    return old_head;
+    return task;
 }
 
-static void* keep_submit(void* arg) {
-    // in bthread, keep submitting requests
-    // submit [tail, head)
-    while (mpsc_submit_tail != nullptr && mpsc_submit_tail != mpsc_submit_head) {
-        if (add_to_sq_no_wait(mpsc_submit_tail)) {
-            mpsc_submit_tail = mpsc_submit_tail->next;
+inline void loop_add_to_sq(IOTask* task, bool enable_wait) {
+    if (!add_to_sq_no_wait(task)) {
+        if (enable_wait) {
+            if (waitfor_epoll(task) != nullptr) add_to_sq_no_wait(task);
         } else {
-            std::unique_lock<bthread::Mutex> lock(*b_mutex[EPOLL_OUT_FD]);
-            if (add_to_sq_no_wait(mpsc_submit_tail)) {  // try again
-                mpsc_submit_tail = mpsc_submit_tail->next;
-            } else {
-                IOURING_SUBMIT
-                b_cond[EPOLL_OUT_FD]->wait(lock);  // waiting for epollout
-            }
+            start_keep_submit(task);
+            return;
         }
     }
-    // submit head
-    // printf("submit head: %p\n", mpsc_submit_head);
-    while (1) {
-        if (add_to_sq_no_wait(mpsc_submit_head)) {
-            break;
-        } else {
-            std::unique_lock<bthread::Mutex> lock(*b_mutex[EPOLL_OUT_FD]);
-            if (add_to_sq_no_wait(mpsc_submit_head)) {
-                break;
-            } else {
-                IOURING_SUBMIT
-                b_cond[EPOLL_OUT_FD]->wait(lock);
-            }
-        }
-    }
-
-    // check new head
     do {
-        IO_task *cur_head, *at, *at_next;
-        if (mpsc_head.load() == mpsc_submit_head) {
-            IOURING_SUBMIT
-            cur_head = is_submit_complete(mpsc_submit_head);
-            if (cur_head == nullptr) return nullptr;
+        IOTask* new_head;
+        if (mpsc_head.load() == task) {
+            submit();
+            new_head = is_submit_complete(task);
+            if (new_head == nullptr) return;
         } else {
-            cur_head = is_submit_complete(mpsc_submit_head);
+            new_head = is_submit_complete(task);
         }
-        at = cur_head;
-        at_next = at->next;
-        while (at_next != mpsc_submit_head) {
-            IO_task* temp_store = at_next->next;
-            at_next->next = at;
-            at = at_next;
-            at_next = temp_store;
-        }
-        cur_head->next = nullptr;
-        while (at != nullptr) {
-            mpsc_submit_tail = at;
+        IOTask* at = task->next;  // skip the first one
+        while (at != nullptr) {   // try to submit all of these requests
             if (add_to_sq_no_wait(at)) {
                 at = at->next;
             } else {
-                std::unique_lock<bthread::Mutex> lock(*b_mutex[EPOLL_OUT_FD]);
-                if (add_to_sq_no_wait(at)) {
-                    at = at->next;
+                if (enable_wait) {
+                    at = waitfor_epoll(at);
                 } else {
-                    IOURING_SUBMIT
-                    b_cond[EPOLL_OUT_FD]->wait(lock);
+                    submit();
+                    start_keep_submit(at);  // start another bthread to submit them
+                    return;                 // prevent blocking
                 }
             }
         }
-        mpsc_submit_head = cur_head;
+        task = new_head;
     } while (1);
 }
 
-inline void start_keep_submit() {
-    bthread_start_background(&keep_submit_bthread, nullptr, keep_submit, nullptr);
+// return new head
+// nullptr: there is no new head
+// others: the pointer to new head
+
+static void* keep_submit(void* arg) {
+    IOTask* tail = static_cast<IOTask*>(arg);
+    // in bthread, keep submitting requests
+    while (tail->next != nullptr) {
+        if (add_to_sq_no_wait(tail)) {
+            tail = tail->next;
+        } else {
+            tail = waitfor_epoll(tail);
+        }
+    }
+    loop_add_to_sq(tail, true);
+    return nullptr;
 }
 
-inline void add_to_mpsc(IO_task* task) {
-    IO_task* prev_head = mpsc_head.load();
-    do {
+inline void start_keep_submit(IOTask* tail) {
+    bthread_start_background(&keep_submit_bthread, nullptr, keep_submit, tail);
+}
+
+inline void add_to_mpsc(IOTask* task) {
+    IOTask* prev_head = mpsc_head.exchange(task, butil::memory_order_release);
+    // printf("%p->%p\n", task, prev_head);
+    if (prev_head != nullptr) {
         task->next = prev_head;
-    } while (!mpsc_head.compare_exchange_strong(prev_head, task, butil::memory_order_acquire));
-    if (prev_head != nullptr) return;
-    // We've got the right to submit.
-    task->next = nullptr;
-    if (!add_to_sq_no_wait(task)) {
-        // failed
-        mpsc_submit_tail = nullptr;
-        mpsc_submit_head = task;
-        start_keep_submit();
         return;
     }
-    // usleep(16);
-    do {
-        IO_task *at, *at_next;
-        if (mpsc_head.load() == task) {
-            IOURING_SUBMIT
-            IO_task* cur_head = is_submit_complete(task);
-            if (cur_head == nullptr) return;
-            mpsc_submit_head = cur_head;
-        } else {
-            mpsc_submit_head = is_submit_complete(task);
-        }
-        at = mpsc_submit_head;
-        at_next = at->next;
-        // reverse the list
-        while (at_next != task) {
-            IO_task* temp_store = at_next->next;
-            at_next->next = at;
-            at = at_next;
-            at_next = temp_store;
-        }
-        mpsc_submit_head->next = nullptr;
-        // list: at -> task
-        while (at != nullptr) {  // try to submit all of these requests
-            mpsc_submit_tail = at;
-            if (add_to_sq_no_wait(at)) {
-                at = at->next;
-            } else {
-                IOURING_SUBMIT
-                start_keep_submit();  // start another bthread to submit them
-                return;               // prevent blocking
-            }
-        }
-        task = mpsc_submit_head;
-    } while (1);
+    // We've got the right to submit.
+    task->next = nullptr;
+    loop_add_to_sq(task);
 }
 
 inline bool is_brpc_co_environment() {
@@ -230,30 +227,28 @@ static void lock_fn_init() {
 
 static void __on_io_uring_epoll_handler(int events) {
     if (events & EPOLLOUT) {
-        std::unique_lock<bthread::Mutex> lock(*b_mutex[EPOLL_OUT_FD]);
-        b_cond[EPOLL_OUT_FD]->notify_one();
+        epoll_butex->fetch_add(1, butil::memory_order_relaxed);
+        bthread::butex_wake(epoll_butex);
     }
     if (events & EPOLLIN) {
-        static struct io_uring_cqe* cqes[QD];
-        unsigned int ret = io_uring_peek_batch_cqe(&ring, cqes, QD);
-        for (int i = 0; i < ret; i++) {
-            int fd = cqes[i]->user_data;
-            {
-                std::unique_lock lock(*b_mutex[fd]);
-                fd_offset[fd] += cqes[i]->res;
-                fd_ret[fd] = cqes[i]->res;
-                b_cond[fd]->notify_one();
-                // printf("notify! %d\n", fd);
+        io_uring_cqe* cqe;
+        do {
+            unsigned head, nr = 0;
+            io_uring_for_each_cqe(&ring, head, cqe) {
+                ++nr;
+                IOTask* task = reinterpret_cast<IOTask*>(cqe->user_data);
+                task->return_value = cqe->res;
+                task->butex->fetch_add(1, butil::memory_order_relaxed);
+                bthread::butex_wake(task->butex);
             }
-            io_uring_cqe_seen(&ring, cqes[i]);
-        }
+            io_uring_cq_advance(&ring, nr);
+        } while (io_uring_peek_cqe(&ring, &cqe) == 0);
     }
 }
 
 __attribute__((constructor)) void library_init() {
     io_uring_queue_init(QD, &ring, 0);
-    b_cond[EPOLL_OUT_FD] = new bthread::ConditionVariable();
-    b_mutex[EPOLL_OUT_FD] = new bthread::Mutex();
+    epoll_butex = bthread::butex_create_checked<butil::atomic<int>>();
     brpc::EventDispatcher& dispathcer = brpc::GetGlobalEventDispatcher(ring.ring_fd);
     dispathcer.RegisterIOuringHandler(__on_io_uring_epoll_handler);
     if (dispathcer.AddIOuringEpoll(ring.ring_fd)) {
@@ -265,6 +260,8 @@ __attribute__((constructor)) void library_init() {
 
 __attribute__((destructor)) void library_cleanup() {
     io_uring_queue_exit(&ring);
+    bthread::butex_destroy(epoll_butex);
+    LOG(INFO) << "Submit Info: Mean=" << statistic.mean() << ", Std=" << statistic.std();
 }
 
 extern "C" int open(const char* __path, int __oflag, ...) {
@@ -285,8 +282,6 @@ extern "C" int open(const char* __path, int __oflag, ...) {
     }
     if (S_ISREG(statbuf.st_mode)) {
         is_file_fd[fd] = true;
-        b_cond[fd] = new bthread::ConditionVariable();
-        b_mutex[fd] = new bthread::Mutex();
         fd_offset[fd] = 0;
     }
     return fd;
@@ -294,28 +289,30 @@ extern "C" int open(const char* __path, int __oflag, ...) {
 
 extern "C" int close(int __fd) {
     if (fn_close == nullptr) lock_fn_init();
-    if (is_file_fd[__fd]) {
-        delete b_cond[__fd];
-        delete b_mutex[__fd];
-    }
     is_file_fd[__fd] = false;
     return fn_close(__fd);
 }
 
+// long long getCurrentNanoseconds() {
+//     auto now = std::chrono::high_resolution_clock::now();
+//     auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+//     return nanoseconds;
+// }
+
 extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) {
     if (fn_read == nullptr) lock_fn_init();
     if (is_file_fd[__fd] && is_brpc_co_environment()) {
-        IO_task* task = butil::get_object<IO_task>();
-        task->type = 0;
-        task->fd = __fd;
-        task->buf = __buf;
-        task->nbytes = __nbytes;
-        {
-            std::unique_lock lock(*b_mutex[__fd]);
-            add_to_mpsc(task);
-            b_cond[__fd]->wait(lock);
-        }
-        return fd_ret[__fd];
+        // printf("read\n");
+        IOTask* task = butil::get_object<IOTask>();
+        task->init();
+        task->type = IOType::READ, task->fd = __fd;
+        task->buf = __buf, task->nbytes = __nbytes;
+        task->process();
+        fd_offset[__fd] += task->return_value;
+        task->release();
+        butil::return_object(task);
+        // printf("finish\n");
+        return task->return_value;
     } else {
         ssize_t __bytes = fn_read(__fd, __buf, __nbytes);
         fd_offset[__fd] += __bytes;
@@ -326,17 +323,15 @@ extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) {
 extern "C" ssize_t write(int __fd, const void* __buf, size_t __n) {
     if (fn_write == nullptr) lock_fn_init();
     if (is_file_fd[__fd] && is_brpc_co_environment()) {
-        IO_task* task = butil::get_object<IO_task>();
-        task->type = 0;
-        task->fd = __fd;
-        task->buf = const_cast<void*>(__buf);
-        task->nbytes = __n;
-        {
-            std::unique_lock lock(*b_mutex[__fd]);
-            add_to_mpsc(task);
-            b_cond[__fd]->wait(lock);
-        }
-        return fd_ret[__fd];
+        IOTask* task = butil::get_object<IOTask>();
+        task->init();
+        task->type = IOType::WRITE, task->fd = __fd;
+        task->buf = const_cast<void*>(__buf), task->nbytes = __n;
+        task->process();
+        fd_offset[__fd] += task->return_value;
+        task->release();
+        butil::return_object(task);
+        return task->return_value;
     } else {
         ssize_t __bytes = fn_write(__fd, __buf, __n);
         fd_offset[__fd] += __bytes;
