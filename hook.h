@@ -23,7 +23,7 @@ struct Statistic;
 inline void submit();
 inline IOTask* is_submit_complete(IOTask* old_head);
 inline bool add_to_sq_no_wait(IOTask* task);
-inline IOTask* waitfor_epoll(IOTask* task);
+inline void waitfor_epoll(IOTask* task);
 inline void loop_add_to_sq(IOTask* task, bool enable_wait = false);
 static void* keep_submit(void* arg);
 inline void start_keep_submit(IOTask* tail);
