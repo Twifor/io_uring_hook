@@ -8,7 +8,9 @@ static uint64_t fd_offset[FD_SIZE];  // offset of files
 static struct io_uring ring;
 static butil::atomic<IOTask*> mpsc_head;
 static bthread_t keep_submit_bthread;
-static butil::atomic<int>* epoll_butex;
+static bthread::Mutex epoll_m;
+static bthread::ConditionVariable epoll_cond;
+// static butil::atomic<int>* epoll_butex;
 
 // original functions
 typedef int (*fn_open_ptr)(const char*, int, ...);
@@ -50,31 +52,35 @@ struct ____cacheline_aligned IOTask {
     void* buf;
     ssize_t nbytes;
     ssize_t return_value;
-    butil::atomic<int>* butex;
+    // butil::atomic<int>* butex;
+    bthread::Mutex m;
+    bthread::ConditionVariable cond;
 
     IOTask* next;
 
     IOTask() {}
 
     void init() {
-        butex = bthread::butex_create_checked<butil::atomic<int>>();
+        // butex = bthread::butex_create_checked<butil::atomic<int>>();
         next = nullptr;
     }
 
     void process() {
-        const int expected_val = butex->load(butil::memory_order_relaxed);
+        // const int expected_val = butex->load(butil::memory_order_relaxed);
+        std::unique_lock lock(m);
         add_to_mpsc(this);
-        int rc = bthread::butex_wait(butex, expected_val, nullptr);
-        const int saved_errno = errno;
-        if (rc < 0) {
-            // printf("retry")
-            if (saved_errno == 11 && butex->load(butil::memory_order_relaxed) != expected_val) return;
-            LOG(FATAL) << "butex error: " << strerror(saved_errno);
-        }
+        cond.wait(lock);
+        // int rc = bthread::butex_wait(butex, expected_val, nullptr);
+        // const int saved_errno = errno;
+        // if (rc < 0) {
+        //     // printf("retry")
+        //     if (saved_errno == 11 && butex->load(butil::memory_order_relaxed) != expected_val) return;
+        //     LOG(FATAL) << "butex error: " << strerror(saved_errno);
+        // }
     }
 
     void release() {
-        bthread::butex_destroy(butex);
+        // bthread::butex_destroy(butex);
     }
 };
 
@@ -121,15 +127,10 @@ inline bool add_to_sq_no_wait(IOTask* task) {
 }
 
 inline IOTask* waitfor_epoll(IOTask* task) {
-    const int expected_val = epoll_butex->load();
+    std::unique_lock lock(epoll_m);
     if (add_to_sq_no_wait(task)) return task->next;
     submit();
-    int rc = bthread::butex_wait(epoll_butex, expected_val, nullptr);
-    const int saved_errno = errno;
-    if (rc < 0) {
-        if (rc == 11 && epoll_butex->load(butil::memory_order_release) != expected_val) return task;
-        LOG(FATAL) << "butex error: " << strerror(errno);
-    }
+    epoll_cond.wait(lock);
     return task;
 }
 
@@ -227,8 +228,8 @@ static void lock_fn_init() {
 
 static void __on_io_uring_epoll_handler(int events) {
     if (events & EPOLLOUT) {
-        epoll_butex->fetch_add(1, butil::memory_order_relaxed);
-        bthread::butex_wake(epoll_butex);
+        std::unique_lock lock(epoll_m);
+        epoll_cond.notify_one();
     }
     if (events & EPOLLIN) {
         io_uring_cqe* cqe;
@@ -237,9 +238,11 @@ static void __on_io_uring_epoll_handler(int events) {
             io_uring_for_each_cqe(&ring, head, cqe) {
                 ++nr;
                 IOTask* task = reinterpret_cast<IOTask*>(cqe->user_data);
+                std::unique_lock lock(task->m);
                 task->return_value = cqe->res;
-                task->butex->fetch_add(1, butil::memory_order_relaxed);
-                bthread::butex_wake(task->butex);
+                task->cond.notify_one();
+                // task->butex->fetch_add(1, butil::memory_order_relaxed);
+                // bthread::butex_wake(task->butex);
             }
             io_uring_cq_advance(&ring, nr);
         } while (io_uring_peek_cqe(&ring, &cqe) == 0);
@@ -248,7 +251,7 @@ static void __on_io_uring_epoll_handler(int events) {
 
 __attribute__((constructor)) void library_init() {
     io_uring_queue_init(QD, &ring, 0);
-    epoll_butex = bthread::butex_create_checked<butil::atomic<int>>();
+    // epoll_butex = bthread::butex_create_checked<butil::atomic<int>>();
     brpc::EventDispatcher& dispathcer = brpc::GetGlobalEventDispatcher(ring.ring_fd);
     dispathcer.RegisterIOuringHandler(__on_io_uring_epoll_handler);
     if (dispathcer.AddIOuringEpoll(ring.ring_fd)) {
@@ -260,7 +263,7 @@ __attribute__((constructor)) void library_init() {
 
 __attribute__((destructor)) void library_cleanup() {
     io_uring_queue_exit(&ring);
-    bthread::butex_destroy(epoll_butex);
+    // bthread::butex_destroy(epoll_butex);
     LOG(INFO) << "Submit Info: Mean=" << statistic.mean() << ", Std=" << statistic.std();
 }
 
