@@ -15,7 +15,7 @@
 #include <sys/stat.h>
 
 enum IOType { READ, WRITE };
-const int QD = 4;
+const int QD = 256;
 const int FD_SIZE = 8192000;
 #define ____cacheline_aligned __attribute__((__aligned__(64)))
 
@@ -36,20 +36,6 @@ private:
 public:
     inline void ref();
     inline void unref();
-
-    // class __IOTaskPtr {
-    // private:
-    //     IOTask* ptr;
-
-    // public:
-    //     IOTask* get() const;
-    //     __IOTaskPtr(IOTask* p = nullptr);
-    //     __IOTaskPtr(const __IOTaskPtr& p);
-    //     const __IOTaskPtr& operator=(const __IOTaskPtr& p);
-    //     __IOTaskPtr(__IOTaskPtr&& p) = delete;
-    //     ~__IOTaskPtr();
-    //     IOTask* operator->();
-    // };
     void* buf;
     IOType type;
     int fd;
@@ -83,11 +69,10 @@ static fn_read_ptr fn_read = nullptr;
 static fn_write_ptr fn_write = nullptr;
 static fn_openat_ptr fn_openat = nullptr;
 inline void submit();
-inline IOTask* is_submit_complete(IOTask* old_head, IOTask*& new_tail);
-inline void loop_add_to_sq(IOTask* task, bool enable_wait = false);
+inline bool is_submit_complete(IOTask* old_head, bool is_cur_task_resolved);
+inline void loop_add_to_sq(IOTask* old_head, bool enable_wait);
 inline void add_to_mpsc(IOTask* task);
-inline bool add_to_sq_no_wait(IOTask* task);
-inline void waitfor_epoll(IOTask* task);
+inline bool add_to_sq(IOTask* task, bool enable_wait);
 static void* keep_submit(void* arg);
 inline void start_keep_submit(IOTask* tail);
 inline bool is_brpc_co_environment();
