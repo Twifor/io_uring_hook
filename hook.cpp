@@ -14,50 +14,23 @@ double Statistic::std() const {
 }
 
 void IOTask::ref() {
-    cnt.fetch_add(1);
+    cnt.fetch_add(1, butil::memory_order_relaxed);
 }
 
 void IOTask::unref() {
-    int res = cnt.fetch_sub(1);
+    int res = cnt.fetch_sub(1, butil::memory_order_relaxed);
     if (res == 1) release();
 }
 
 void IOTask::release() {
-    if (cnt.load() != 0) {
-        printf("%d\n", cnt.load());
-    }
     next = nullptr;
     bthread::butex_destroy(butex);
     // printf("return back %p\n", this);
     butil::return_object(this);
 }
 
-// IOTask::__IOTaskPtr::__IOTaskPtr(IOTask* p) {
-//     if (p) p->enter();
-//     ptr = p;
-// }
-// IOTask::__IOTaskPtr::__IOTaskPtr(const __IOTaskPtr& p) {
-//     if (p.ptr) p.ptr->enter();
-//     ptr = p.ptr;
-// }
-// const IOTask::__IOTaskPtr& IOTask::__IOTaskPtr::operator=(const __IOTaskPtr& p) {
-//     if (p.ptr) p.ptr->enter();
-//     if (ptr) ptr->leave();
-//     ptr = p.ptr;
-//     return (*this);
-// }
-// IOTask* IOTask::__IOTaskPtr::get() const {
-//     return ptr;
-// }
-// IOTask::__IOTaskPtr::~__IOTaskPtr() {
-//     if (ptr) ptr->leave();
-// }
-// IOTask* IOTask::__IOTaskPtr::operator->() {
-//     return ptr;
-// }
-
 void IOTask::wait_process() {
-    const int expected_val = butex->load();
+    const int expected_val = butex->load(butil::memory_order_acquire);
     add_to_mpsc(this);
     // assert(this->flag.load());
     // printf("wait %d %p\n", bthread_self(), this);
@@ -68,12 +41,12 @@ void IOTask::wait_process() {
 IOTask* IOTask::init() {
     butex = bthread::butex_create_checked<butil::atomic<int>>();
     next = nullptr;
-    cnt.store(0);
+    cnt.store(0, butil::memory_order_release);
     return this;
 }
 
 void IOTask::notify() {
-    butex->fetch_add(1);
+    butex->fetch_add(1, butil::memory_order_release);
     // printf("notify %p\n", this);
     bthread::butex_wake(butex);
 }
@@ -88,7 +61,7 @@ inline IOTask* is_submit_complete(IOTask* old_head, IOTask*& new_tail) {
     IOTask *desired = nullptr, *__new_head = old_head;
     // printf("is there newer head than %p?\n", __new_head);
     //     attempt to do CAS
-    if (mpsc_head.compare_exchange_strong(__new_head, desired, butil::memory_order_acquire)) {
+    if (mpsc_head.compare_exchange_strong(__new_head, desired, butil::memory_order_release)) {
         // printf("set head to null cause head = %p\n", old_head.get());
         return nullptr;
     }
@@ -184,7 +157,7 @@ inline bool add_to_sq_no_wait(IOTask* task) {
 }
 
 inline void waitfor_epoll(IOTask* task) {
-    const int expected_val = epoll_butex->load();
+    const int expected_val = epoll_butex->load(butil::memory_order_acquire);
     if (add_to_sq_no_wait(task)) return;
     submit();
     int rc = bthread::butex_wait(epoll_butex, expected_val, nullptr);
