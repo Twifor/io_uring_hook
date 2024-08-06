@@ -65,7 +65,7 @@ struct Statistic {
         }
     }
     inline void show() const {
-        LOG(DEBUG) << "Submit Info: Mean=" << mean() << ", Std=" << std();
+        LOG(INFO) << "Submit Info: Mean=" << mean() << ", Std=" << std();
     }
     inline double mean() const { return 1.0 * sum / cnt; }
     inline double std() const {
