@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <memory>
 #define ____cacheline_aligned __attribute__((__aligned__(64)))
+#define EXPORT __attribute__((visibility("default")))
 
 /*
  * env variables:
@@ -22,10 +23,10 @@
  * IOURING_HOOK_SQPOLL = false
  */
 
-int QD = 256;                 // queue size, should be 2^m
-const int FD_SIZE = 8192000;  // maximum file descriptors size
-int LOG_FREQ;
-bool ENABLE_SQPOLL;
+static int QD = 256;                 // queue size, should be 2^m
+static const int FD_SIZE = 8192000;  // maximum file descriptors size
+static int LOG_FREQ;
+static bool ENABLE_SQPOLL;
 
 enum IOType { READ, WRITE };
 class IOTask;
@@ -44,12 +45,12 @@ typedef int (*fn_close_ptr)(int);
 typedef ssize_t (*fn_read_ptr)(int __fd, void* __buf, size_t __nbytes);
 typedef ssize_t (*fn_write_ptr)(int __fd, const void* __buf, size_t __n);
 typedef int (*fn_openat_ptr)(int __fd, const char* __path, int __oflag, ...);
-__attribute__((constructor)) void library_init();
-__attribute__((destructor)) void library_cleanup();
-extern "C" int open(const char* __path, int __oflag, ...);
-extern "C" int close(int __fd);
-extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes);
-extern "C" ssize_t write(int __fd, const void* __buf, size_t __nbytes);
+static __attribute__((constructor)) void library_init();
+static __attribute__((destructor)) void library_cleanup();
+extern "C" int open(const char* __path, int __oflag, ...) EXPORT;
+extern "C" int close(int __fd) EXPORT;
+extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) EXPORT;
+extern "C" ssize_t write(int __fd, const void* __buf, size_t __nbytes) EXPORT;
 
 struct Statistic {
     uint64_t sum = 0;
@@ -275,7 +276,7 @@ static void* keep_submit(void* arg) {
 
 // start a bthread to submit tasks (from tail)
 inline void start_keep_submit(IOTask* tail) {
-    // resovle errno
+    // resolve errno
     bthread_start_background(&keep_submit_bthread, nullptr, keep_submit, tail);
 }
 
@@ -320,7 +321,7 @@ static void on_io_uring_epoll_handler(int events) {
     }
 }
 
-__attribute__((constructor)) void library_init() {
+static __attribute__((constructor)) void library_init() {
     char* env_pointer = std::getenv("IOURING_HOOK_LOG_FREQ");
     LOG_FREQ = env_pointer != nullptr ? atoi(env_pointer) : 10000;
     env_pointer = std::getenv("IOURING_HOOK_SQPOLL");
@@ -342,7 +343,7 @@ __attribute__((constructor)) void library_init() {
     LOG(INFO) << "sqpoll = " << ENABLE_SQPOLL;
 }
 
-__attribute__((destructor)) void library_cleanup() {
+static __attribute__((destructor)) void library_cleanup() {
     io_uring_queue_exit(&ring);
     bthread::butex_destroy(epoll_butex);
 }
