@@ -21,7 +21,11 @@
 
 namespace brpc {
 
-EventDispatcher::EventDispatcher() : _epfd(-1), _stop(false), _tid(0), _consumer_thread_attr(BTHREAD_ATTR_NORMAL) {
+EventDispatcher::EventDispatcher()
+    : _epfd(-1),
+      _stop(false),
+      _tid(0),
+      _consumer_thread_attr(BTHREAD_ATTR_NORMAL) {
     _epfd = epoll_create(1024 * 1024);
     if (_epfd < 0) {
         PLOG(FATAL) << "Fail to create epoll";
@@ -57,17 +61,21 @@ int EventDispatcher::Start(const bthread_attr_t* consumer_thread_attr) {
     }
 
     if (_tid != 0) {
-        LOG(FATAL) << "Already started this dispatcher(" << this << ") in bthread=" << _tid;
+        LOG(FATAL) << "Already started this dispatcher(" << this
+                   << ") in bthread=" << _tid;
         return -1;
     }
 
     // Set _consumer_thread_attr before creating epoll thread to make sure
     // everyting seems sane to the thread.
-    _consumer_thread_attr = (consumer_thread_attr ? *consumer_thread_attr : BTHREAD_ATTR_NORMAL);
+    _consumer_thread_attr =
+        (consumer_thread_attr ? *consumer_thread_attr : BTHREAD_ATTR_NORMAL);
 
-    //_consumer_thread_attr is used in StartInputEvent(), assign flag NEVER_QUIT to it will cause new bthread
+    //_consumer_thread_attr is used in StartInputEvent(), assign flag NEVER_QUIT
+    // to it will cause new bthread
     // that created by epoll_wait() never to quit.
-    bthread_attr_t epoll_thread_attr = _consumer_thread_attr | BTHREAD_NEVER_QUIT;
+    bthread_attr_t epoll_thread_attr =
+        _consumer_thread_attr | BTHREAD_NEVER_QUIT;
 
     // Polling thread uses the same attr for consumer threads (NORMAL right
     // now). Previously, we used small stack (32KB) which may be overflowed
@@ -90,7 +98,7 @@ void EventDispatcher::Stop() {
     _stop = true;
 
     if (_epfd >= 0) {
-        epoll_event evt = { EPOLLOUT, { NULL } };
+        epoll_event evt = {EPOLLOUT, {NULL}};
         epoll_ctl(_epfd, EPOLL_CTL_ADD, _wakeup_fds[1], &evt);
     }
 }
@@ -102,17 +110,18 @@ void EventDispatcher::Join() {
     }
 }
 
-void EventDispatcher::RegisterIOuringHandler(void (*fun)(int)) {
+void EventDispatcher::RegisterIOuringHandler(void (*fun)(int, int)) {
     io_uring_handler = fun;
 }
 
-int EventDispatcher::AddIOuringEpoll(int io_uring_fd) {
+int EventDispatcher::AddIOuringEpoll(int io_uring_fd, int io_uring_id) {
     if (_epfd < 0) {
         errno = EINVAL;
         return -1;
     }
     epoll_event evt;
-    evt.data.u64 = ~0ULL;  // to label io_uring instance
+    evt.data.u64 =
+        (0xffffffffLL << 32) | io_uring_id;  // to label io_uring instance
     evt.events = EPOLLOUT | EPOLLIN | EPOLLET;
     if (epoll_ctl(_epfd, EPOLL_CTL_ADD, io_uring_fd, &evt) < 0) return -1;
     return 0;
@@ -236,19 +245,24 @@ void EventDispatcher::Run() {
                 || (e[i].events & has_epollrdhup)
 #endif
             ) {
-                if (e[i].data.u64 == ~0ULL) {
-                    io_uring_handler(e[i].events);
+                if ((e[i].data.u64 & ((0xffffffffULL << 32))) ==
+                    (0xffffffffULL << 32)) {
+                    io_uring_handler(e[i].events,
+                                     e[i].data.u64 & 0xffffffffULL);
                 } else {
                     // We don't care about the return value.
-                    Socket::StartInputEvent(e[i].data.u64, e[i].events, _consumer_thread_attr);
+                    Socket::StartInputEvent(e[i].data.u64, e[i].events,
+                                            _consumer_thread_attr);
                 }
             }
         }
         for (int i = 0; i < n; ++i) {
             if (e[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP)) {
                 // We don't care about the return value.
-                if (e[i].data.u64 == ~0ULL) {
-                    io_uring_handler(e[i].events);
+                if ((e[i].data.u64 & ((0xffffffffULL << 32))) ==
+                    (0xffffffffULL << 32)) {
+                    io_uring_handler(e[i].events,
+                                     e[i].data.u64 & 0xffffffffULL);
                 } else {
                     Socket::HandleEpollOut(e[i].data.u64);
                 }

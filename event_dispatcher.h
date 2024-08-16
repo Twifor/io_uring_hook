@@ -29,7 +29,7 @@ namespace brpc {
 class EventDispatcher {
     friend class Socket;
 
-public:
+   public:
     EventDispatcher();
 
     virtual ~EventDispatcher();
@@ -64,9 +64,9 @@ public:
     // Returns 0 on success, -1 otherwise and errno is set
     int AddEpollOut(SocketId socket_id, int fd, bool pollin);
 
-    void RegisterIOuringHandler(void (*fun)(int));
+    void RegisterIOuringHandler(void (*fun)(int, int));
 
-    int AddIOuringEpoll(int io_uring_fd);
+    int AddIOuringEpoll(int io_uring_fd, int io_uring_id);
 
     int RemoveIOuringEpoll(int io_uring_fd);
 
@@ -75,13 +75,13 @@ public:
     // Returns 0 on success, -1 otherwise and errno is set
     int RemoveEpollOut(SocketId socket_id, int fd, bool pollin);
 
-private:
+   private:
     DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
 
     // Calls Run()
     static void* RunThis(void* arg);
 
-    void (*io_uring_handler)(int);
+    void (*io_uring_handler)(int, int);
 
     // Thread entry.
     void Run();
