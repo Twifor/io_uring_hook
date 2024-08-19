@@ -30,6 +30,7 @@ static int IOURING_HOOK_QUEUE_DEPTH;  // queue size, should be 2^m
 static const int FD_SIZE = 8192000;   // maximum file descriptors size
 static int IOURING_HOOK_LOG_FREQ;
 static bool IOURING_HOOK_ENABLE_SQPOLL;
+static std::atomic<int> ref_counter;
 
 enum IOType { READ, PREAD };
 class IOTask;
@@ -91,7 +92,7 @@ struct Statistic {
     }
     inline void show() const {
         LOG(INFO) << "Submit Info [" << id << "]: Mean=" << mean()
-                  << ", Std=" << std();
+                  << ", Std=" << std() << ", Ref count: " << ref_counter.load();
     }
     inline double mean() const { return 1.0 * sum / cnt; }
     inline double std() const {
@@ -105,6 +106,7 @@ struct ____cacheline_aligned IOTask {
     ssize_t return_value;
     // destroy instance and return object
     inline void release() {
+        ref_counter.fetch_sub(1);
         assert(cnt.load() == 0);
         next = nullptr;
         bthread::butex_destroy(butex);
@@ -151,6 +153,7 @@ struct ____cacheline_aligned IOTask {
     // initialize IOTask instance
     // you should call this function after get_object()
     IOTask* init() {
+        ref_counter.fetch_add(1);
         butex = bthread::butex_create_checked<butil::atomic<int>>();
         next = nullptr;
         cnt.store(0, butil::memory_order_release);
