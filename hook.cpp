@@ -72,6 +72,8 @@ extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) EXPORT;
 extern "C" int openat(int __fd, const char* __path, int __oflag, ...) EXPORT;
 extern "C" ssize_t pread(int __fd, void* __buf, size_t __nbytes,
                          __off64_t __offset) EXPORT;
+extern "C" ssize_t pread64(int __fd, void* __buf, size_t __nbytes,
+                           __off64_t __offset) EXPORT;
 
 struct Statistic {
     uint64_t sum = 0;
@@ -516,4 +518,9 @@ extern "C" ssize_t pread(int __fd, void* __buf, size_t __nbytes,
         ssize_t __bytes = fn_pread(__fd, __buf, __nbytes, __offset);
         return __bytes;
     }
+}
+
+extern "C" ssize_t pread64(int __fd, void* __buf, size_t __nbytes,
+                           __off64_t __offset) {
+    return pread(__fd, __buf, __nbytes, __offset);
 }
