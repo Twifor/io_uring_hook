@@ -34,7 +34,7 @@ static bool IOURING_HOOK_ENABLE_SQPOLL;
 enum IOType { READ, PREAD };
 class IOTask;
 class IOUring;
-inline void submit();
+inline void submit(int io_uring_id);
 inline bool is_submit_complete(IOTask* old_head, bool is_cur_task_resolved);
 inline void loop_add_to_sq(IOTask* old_head, bool enable_wait);
 inline void add_to_mpsc(IOTask* task);
@@ -171,6 +171,7 @@ struct IOUring {
     bthread_t keep_submit_bthread;     // the bthread for submitting
     butil::atomic<int>* epoll_butex;   // the butex for epoll out
     Statistic statistic;
+    IOUring() { mpsc_head.store(nullptr); }
     void init(brpc::EventDispatcher& dispatcher, int io_uring_id) {
         io_uring_queue_init(
             IOURING_HOOK_QUEUE_DEPTH, &ring,
