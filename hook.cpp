@@ -123,10 +123,19 @@ struct ____cacheline_aligned IOTask {
     }
 
     inline void set_return_value(ssize_t res) {
+        if (res < 0) {
+            LOG(FATAL) << "Invalid result: " << res;
+            exit(-1);
+        }
         return_value = res;
         // bug fix (for cephFS)
         if (type == IOType::READ &&
             return_value + fd_offset[fd] > fd_size[fd]) {
+            if (fd_offset[fd] > fd_size[fd]) {
+                LOG(FATAL) << "Internal Error: Invalid offset " << fd_offset[fd]
+                           << " with file size " << fd_size[fd];
+                exit(-1);
+            }
             return_value = fd_size[fd] - fd_offset[fd];
         } else if (type == IOType::PREAD &&
                    return_value + offset > fd_size[fd]) {
