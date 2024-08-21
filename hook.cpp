@@ -235,7 +235,7 @@ inline void submit(int io_uring_id) {
 retry:
     int ret = io_uring_submit(&io_uring_instances[io_uring_id].ring);
     if (ret < 0) {
-        if (-ret == 11 || -ret == 16) {  // EAGAIN or EBUSY
+        if (ret == -EAGAIN || ret == -EBUSY) {  // EAGAIN or EBUSY
             bthread_usleep(10);
             goto retry;
         }
@@ -322,7 +322,7 @@ inline bool add_to_sq(IOTask* task, bool enable_wait) {
             int rc = bthread::butex_wait(
                 io_uring_instances[fd_iouring[task->fd]].epoll_butex,
                 expected_val, nullptr);
-            if (rc < 0 && errno != 11) {  // EAGAIN
+            if (rc < 0 && errno != EAGAIN) {  // EAGAIN
                 LOG(FATAL) << "butex error: " << strerror(errno);
             }
             sqe = io_uring_get_sqe(
@@ -505,7 +505,7 @@ extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) {
             task->wait_process();
             ret = task->get_return_value();
             task->unref();
-        } while (ret == -4 || ret == -11);
+        } while (ret == -EINTR || ret == -EAGAIN);
         fd_offset[__fd] += ret;
         return ret;
     } else {
@@ -531,7 +531,7 @@ extern "C" ssize_t pread(int __fd, void* __buf, size_t __nbytes,
             task->wait_process();
             ret = task->get_return_value();
             task->unref();
-        } while (ret == -4 || ret == -11);
+        } while (ret == -EINTR || ret == -EAGAIN);
         return ret;
     } else {
         ssize_t __bytes = fn_pread(__fd, __buf, __nbytes, __offset);
