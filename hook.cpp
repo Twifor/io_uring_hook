@@ -123,8 +123,8 @@ struct ____cacheline_aligned IOTask {
     }
 
     inline void set_return_value(ssize_t res) {
-        if (res < 0) {
-            LOG(FATAL) << "Invalid result: " << res;
+        if (res < 0 && res != -4 && res != -11) {
+            LOG(FATAL) << "Invalid result: " << res << " " << strerror(-res);
             exit(-1);
         }
         return_value = res;
@@ -496,14 +496,17 @@ extern "C" ssize_t read(int __fd, void* __buf, size_t __nbytes) {
         lock_fn_init();
     }
     if (is_file_fd[__fd] && is_brpc_co_environment()) {
-        IOTask* task = butil::get_object<IOTask>()->init();
-        task->ref();
-        task->type = IOType::READ, task->fd = __fd;
-        task->buf = __buf, task->nbytes = __nbytes;
-        task->wait_process();
-        fd_offset[__fd] += task->get_return_value();
-        ssize_t ret = task->get_return_value();
-        task->unref();
+        ssize_t ret;
+        do {
+            IOTask* task = butil::get_object<IOTask>()->init();
+            task->ref();
+            task->type = IOType::READ, task->fd = __fd;
+            task->buf = __buf, task->nbytes = __nbytes;
+            task->wait_process();
+            ret = task->get_return_value();
+            task->unref();
+        } while (ret == -4 || ret == -11);
+        fd_offset[__fd] += ret;
         return ret;
     } else {
         ssize_t __bytes = fn_read(__fd, __buf, __nbytes);
@@ -518,14 +521,17 @@ extern "C" ssize_t pread(int __fd, void* __buf, size_t __nbytes,
         lock_fn_init();
     }
     if (is_file_fd[__fd] && is_brpc_co_environment()) {
-        IOTask* task = butil::get_object<IOTask>()->init();
-        task->ref();
-        task->type = IOType::PREAD, task->fd = __fd;
-        task->buf = __buf, task->nbytes = __nbytes;
-        task->offset = __offset;
-        task->wait_process();
-        ssize_t ret = task->get_return_value();
-        task->unref();
+        ssize_t ret;
+        do {
+            IOTask* task = butil::get_object<IOTask>()->init();
+            task->ref();
+            task->type = IOType::PREAD, task->fd = __fd;
+            task->buf = __buf, task->nbytes = __nbytes;
+            task->offset = __offset;
+            task->wait_process();
+            ret = task->get_return_value();
+            task->unref();
+        } while (ret == -4 || ret == -11);
         return ret;
     } else {
         ssize_t __bytes = fn_pread(__fd, __buf, __nbytes, __offset);
