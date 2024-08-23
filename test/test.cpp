@@ -1,8 +1,3 @@
-#include <arrow/array.h>
-#include <arrow/io/file.h>
-#include <arrow/memory_pool.h>
-#include <arrow/result.h>
-#include <arrow/table.h>
 #include <brpc/event_dispatcher.h>
 #include <bthread/bthread.h>
 #include <bthread/task_group.h>
@@ -10,7 +5,6 @@
 #include <execinfo.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
-#include <parquet/arrow/reader.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -22,8 +16,15 @@
 
 #include "csv_reader_bthread.h"
 #include "parser.h"
-// DEFINE_int32(bthread_concurrency, 8, "Number of bthread workers");
 
+#ifdef USING_PARQUET
+#include <arrow/array.h>
+#include <arrow/io/file.h>
+#include <arrow/memory_pool.h>
+#include <arrow/result.h>
+#include <arrow/table.h>
+#include <parquet/arrow/reader.h>
+#endif
 typedef Util::IO::LineReader<EchoCSVParser, Util::IO::SynchronousReader> Reader;
 bthread::Mutex m;
 
