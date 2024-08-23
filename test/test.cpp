@@ -69,7 +69,7 @@ void read_parquet(int id) {
         parquet_reader->parquet_reader()->metadata();
     int num_columns = file_metadata->num_columns();
     auto what = getRandomPermutation(num_columns);
-    for (int col : what) {
+    for (int col = 0; col < num_columns; col++) {
         std::shared_ptr<arrow::ChunkedArray> column;
         arrow::Status status = parquet_reader->ReadColumn(col, &column);
         auto chunks = column->chunks();
@@ -104,7 +104,7 @@ void read_csv(int id) {
 }
 
 void* fun(void* arg) {
-    int id = reinterpret_cast<uint64_t>(arg);
+    uint64_t id = reinterpret_cast<uint64_t>(arg);
 #ifdef USING_PARQUET
     read_parquet(id);
 #else
@@ -126,7 +126,7 @@ int main(int argc, char* argv[]) {
     bthread_t tid[2048];
     std::vector<std::thread> threads;
     bthread_attr_t attr = BTHREAD_ATTR_NORMAL;
-    for (int i = 1; i <= bthread_num; i++) {
+    for (uint64_t i = 1; i <= bthread_num; i++) {
         if (use_pthread) {
             threads.push_back(std::thread(fun, (void*)i));
         } else {
