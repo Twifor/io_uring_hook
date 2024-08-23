@@ -81,7 +81,7 @@ class ByteSourceBase {
 
 class GZipFileByteSource : public ByteSourceBase {
    public:
-    explicit GZipFileByteSource(gzFile fgz) : fgz_(fgz), gzread_cnt("gzread") {}
+    explicit GZipFileByteSource(gzFile fgz) : fgz_(fgz) {}
     ~GZipFileByteSource() { gzclose(fgz_); }
     int Read(char* buffer, size_t size) {
         if (gzeof(fgz_)) {
@@ -119,7 +119,6 @@ class UnixFileByteSource : public ByteSourceBase {
 
 class AsynchronousReader {
    public:
-    Counter guard_cnt, wait_cnt;
     AsynchronousReader() : guard_cnt("guard"), wait_cnt("wait") {}
     static void* AsyncTask(void* arg) {
         AsynchronousReader* reader = static_cast<AsynchronousReader*>(arg);
