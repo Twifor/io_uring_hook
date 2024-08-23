@@ -119,7 +119,7 @@ class UnixFileByteSource : public ByteSourceBase {
 
 class AsynchronousReader {
    public:
-    AsynchronousReader() : guard_cnt("guard"), wait_cnt("wait") {}
+    AsynchronousReader() {}
     static void* AsyncTask(void* arg) {
         AsynchronousReader* reader = static_cast<AsynchronousReader*>(arg);
         std::unique_lock<bthread::Mutex> guard_wlk(reader->lock_);
@@ -160,14 +160,10 @@ class AsynchronousReader {
     }
 
     int FinishRead() {
-        guard_cnt.start();
         std::unique_lock<bthread::Mutex> guard(lock_);
-        guard_cnt.end();
-        wait_cnt.start();
         while (!read_error_ && read_byte_count_ == -1) {
             read_finished_condition_.wait(guard);
         }
-        wait_cnt.end();
         if (read_error_)
             std::rethrow_exception(read_error_);
         else
