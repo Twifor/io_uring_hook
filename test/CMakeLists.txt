@@ -1,0 +1,30 @@
+function(import_library target_name library_location)
+    add_library(${target_name} STATIC IMPORTED)
+    set_property(TARGET ${target_name} APPEND PROPERTY IMPORTED_CONFIGURATIONS NOCONFIG)
+    set_target_properties(${target_name} PROPERTIES IMPORTED_LOCATION_NOCONFIG "${library_location}")
+    add_dependencies(${target_name} build_liburing)
+endfunction()
+
+if(DEFINED USING_PARQUET)
+    message(STATUS "Linked With Parquet")
+
+    import_library(arrow_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/libarrow.a")
+    import_library(parquet_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/libparquet.a")
+    import_library(thrift_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/libthrift.a")
+    import_library(other_deps_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/libarrow_bundled_dependencies.a")
+    import_library(snappy_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/libsnappy.a")
+    import_library(lz4_static "${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/lib/liblz4.a")
+
+    set(PARQUET_STATIC_LIBS parquet_static arrow_static thrift_static other_deps_static snappy_static lz4_static)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/include)
+endif()
+
+add_executable(test test.cpp)
+target_include_directories(test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../brpc/src)
+target_include_directories(test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/../brpc)
+target_include_directories(test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../liburing/src/include)
+target_link_libraries(test brpc-shared protobuf pthread gflags ssl crypto dl leveldb z glog)
+
+if(DEFINED USING_PARQUET)
+    target_link_libraries(test ${PARQUET_STATIC_LIBS})
+endif()
