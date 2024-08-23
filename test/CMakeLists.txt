@@ -17,6 +17,7 @@ if(DEFINED USING_PARQUET)
 
     set(PARQUET_STATIC_LIBS parquet_static arrow_static thrift_static other_deps_static snappy_static lz4_static)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../parquet-cpp/include)
+    add_definitions(-DUSING_PARQUET)
 endif()
 
 add_executable(test test.cpp)

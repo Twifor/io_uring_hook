@@ -6,7 +6,7 @@ Firstly, you should clone or download the codes of [BRPC](https://github.com/apa
 
 Using the following command to build `liburinghook.so` and `test`:
 ```bash
-build.sh
+./build.sh
 ```
 
 For the cases where CSV (instead of parquet) is used, consider deleting `-DUSING_PARQUET=ON` to achieve it.

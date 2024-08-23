@@ -63,7 +63,7 @@ void read_parquet(int id) {
         infile, arrow::default_memory_pool(), &parquet_reader);
     if (!status.ok()) {
         std::cerr << status.ToString() << std::endl;
-        return nullptr;
+        return;
     }
     std::shared_ptr<parquet::FileMetaData> file_metadata =
         parquet_reader->parquet_reader()->metadata();
@@ -106,8 +106,10 @@ void read_csv(int id) {
 void* fun(void* arg) {
     uint64_t id = reinterpret_cast<uint64_t>(arg);
 #ifdef USING_PARQUET
+    printf("Reading parquet.\n");
     read_parquet(id);
 #else
+    printf("Reading csv.\n");
     read_csv(id);
 #endif
     return nullptr;
