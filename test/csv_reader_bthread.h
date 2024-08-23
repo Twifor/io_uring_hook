@@ -14,33 +14,6 @@
 #include <mutex>
 #include <thread>
 
-inline int64_t getCurrentTimestampNanos() {
-    auto now = std::chrono::system_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        now.time_since_epoch());
-    return duration.count();
-}
-
-struct Counter {
-    int64_t sum = 0;
-    int cnt = 0;
-    int64_t begin_time, end_time;
-    char buf[100];
-    const char* label;
-    Counter(const char* msg) : label(msg) {}
-    void start() { begin_time = getCurrentTimestampNanos(); }
-    void end() {
-        end_time = getCurrentTimestampNanos();
-        sum += end_time - begin_time;
-        ++cnt;
-    }
-    char* get() {
-        sprintf(buf, "[%s: avg: %.2f ms, cnt: %d]", label, 1.0 * sum / cnt,
-                cnt);
-        return buf;
-    }
-};
-
 namespace Util {
 namespace IO {
 
@@ -108,16 +81,13 @@ class ByteSourceBase {
 
 class GZipFileByteSource : public ByteSourceBase {
    public:
-    Counter gzread_cnt;
     explicit GZipFileByteSource(gzFile fgz) : fgz_(fgz), gzread_cnt("gzread") {}
     ~GZipFileByteSource() { gzclose(fgz_); }
     int Read(char* buffer, size_t size) {
         if (gzeof(fgz_)) {
             return 0;
         }
-        // gzread_cnt.start();
         int read_size = gzread(fgz_, buffer, (unsigned)size);
-        // gzread_cnt.end();
         int gz_errno = 0;
         const char* gz_strerror = gzerror(fgz_, &gz_errno);
 
