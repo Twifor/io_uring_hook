@@ -92,7 +92,7 @@ struct Statistic {
     }
     inline void show() const {
         LOG(INFO) << "Submit Info [" << id << "]: Mean=" << mean()
-                  << ", Std=" << std() << ", Ref count: " << ref_counter.load();
+                  << ", Std=" << std() << ", Ref count=" << ref_counter.load();
     }
     inline double mean() const { return 1.0 * sum / cnt; }
     inline double std() const {
