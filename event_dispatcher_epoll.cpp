@@ -18,6 +18,8 @@
 #ifdef BRPC_SOCKET_HAS_EOF
 #include "brpc/details/has_epollrdhup.h"
 #endif
+#define IOURING_HOOK_LABEL (0xffffffffULL << 32)
+#define IOURING_HOOK_MASK (0xffffffffULL)
 
 namespace brpc {
 
@@ -121,7 +123,7 @@ int EventDispatcher::AddIOuringEpoll(int io_uring_fd, int io_uring_id) {
     }
     epoll_event evt;
     evt.data.u64 =
-        (0xffffffffLL << 32) | io_uring_id;  // to label io_uring instance
+        IOURING_HOOK_LABEL | io_uring_id;  // to label io_uring instance
     evt.events = EPOLLOUT | EPOLLIN | EPOLLET;
     if (epoll_ctl(_epfd, EPOLL_CTL_ADD, io_uring_fd, &evt) < 0) return -1;
     return 0;
@@ -245,10 +247,10 @@ void EventDispatcher::Run() {
                 || (e[i].events & has_epollrdhup)
 #endif
             ) {
-                if ((e[i].data.u64 & ((0xffffffffULL << 32))) ==
-                    (0xffffffffULL << 32)) {
+                if ((e[i].data.u64 & IOURING_HOOK_LABEL) ==
+                    IOURING_HOOK_LABEL) {
                     io_uring_handler(e[i].events,
-                                     e[i].data.u64 & 0xffffffffULL);
+                                     e[i].data.u64 & IOURING_HOOK_MASK);
                 } else {
                     // We don't care about the return value.
                     Socket::StartInputEvent(e[i].data.u64, e[i].events,
@@ -259,10 +261,10 @@ void EventDispatcher::Run() {
         for (int i = 0; i < n; ++i) {
             if (e[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP)) {
                 // We don't care about the return value.
-                if ((e[i].data.u64 & ((0xffffffffULL << 32))) ==
-                    (0xffffffffULL << 32)) {
+                if ((e[i].data.u64 & IOURING_HOOK_LABEL) ==
+                    IOURING_HOOK_LABEL) {
                     io_uring_handler(e[i].events,
-                                     e[i].data.u64 & 0xffffffffULL);
+                                     e[i].data.u64 & IOURING_HOOK_MASK);
                 } else {
                     Socket::HandleEpollOut(e[i].data.u64);
                 }

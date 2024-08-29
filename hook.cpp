@@ -115,10 +115,10 @@ struct ____cacheline_aligned IOTask {
 
    public:
     // count + 1
-    inline void ref() { cnt.fetch_add(1, butil::memory_order_relaxed); }
+    inline void ref() { cnt.fetch_add(1, butil::memory_order_seq_cst); }
     // count - 1
     inline void unref() {
-        int res = cnt.fetch_sub(1, butil::memory_order_relaxed);
+        int res = cnt.fetch_sub(1, butil::memory_order_seq_cst);
         if (res == 1) release();
     }
 
